@@ -1,0 +1,152 @@
+---
+title: "2019 Pitching Spatial Data Analysis"
+author: "Azim Ali"
+date: "`r format(Sys.time(), '%m/%d/%Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# load library
+library(ggplot2)
+library(gridExtra)
+library(tidyverse)
+library(xts)
+library(dplyr)
+library(spatstat)
+library(sf)
+library(units)
+```
+
+### Data source and parsing method:
+
+The data was taken from 2019 MLB pitching data (https://www.kaggle.com/pschale/mlb-pitch-data-20152018 by Paul Schale), which was scraped from http://gd2.mlb.com/components/game/mlb/, that has information (speed, break angle, pitch call [called strike, ball, foul, etc.], etc.), pitch location (px and pz), and categories (pitch type) of all pitches thrown in 2019. 
+
+### Dataset filtering explanation:
+
+I filtered the data to show all umpire called strike pitches (batter did not swing), high break angle ($\geq30$), distinct at bat ID, and within the average strike zone window ($px = (-0.8, 0.8)$ and $pz = (1.5, 3.5)$). In reality, the strike zone is adjusted for all batters due to the definition of the strike zone being dependent on the shoulder height to waist height. Also, umpires vary their called strikes across the strike zone. These are the reasons why the data was filtered for called strike pitches.
+
+``` {r message=FALSE, warning=FALSE}
+# Import 2019 MLB pitches data
+pitches2019 <- read.csv("2019_pitches.csv")
+```
+
+```{r message=FALSE, warning=FALSE}
+# Filter the data for average strike zone (-0.80, 0.80 px), (1.5, 3.5 pz)
+pitches2019avgstrikzone <- pitches2019 %>%
+  dplyr::select(px, pz, start_speed, end_speed, break_angle, break_length, code, type, pitch_type, ab_id) %>%
+  filter(px>=-0.80 & px <= 0.80, pz <= 3.5 & pz >= 1.5, type=="C", break_angle >= 30) %>% # Filter for high break angle, window, and called strike pitches
+  drop_na(px, pz, pitch_type, type, code) %>%
+  add_count(ab_id) %>%
+  filter(n==1) # Filter for unique at bats
+pitches2019avgstrikzone_sf <- st_as_sf(pitches2019avgstrikzone, coords = c("px", "pz"))
+
+pitches2019avgstrikzone2 <- pitches2019avgstrikzone %>%
+  dplyr::select(px, pz)
+W<-owin( c(-0.8, 0.8), c(1.5, 3.5) )
+pp1 <- as.ppp(pitches2019avgstrikzone2, W = W)
+```
+
+``` {r message=FALSE, warning=FALSE}
+ggplot() + geom_sf(data = pitches2019avgstrikzone_sf, aes(col=pitch_type), size=0.2, pch=21) +
+  ggtitle("Figure 1. High break angle strike zone pitch locations.") +
+  xlab("px (ft from center of home plate") +
+  ylab("pz (ft height") +
+  theme_bw()
+```
+
+### Discussion stoichastic process of the pitching data:
+
+This set of points can be thought of as being generated from a stochastic process because a pitch can theoretically be pitched at any location within the average strike zone. That means that a high bank angle pitch can theoretically be pitched at any coordinate location in the average strike zone and thus the data is a SPP. 
+
+### Thoughts on second-order dispersion interaction between pitches in the dataset:
+
+It is known that pitches in the same at bat can have a dispersion interaction property (second-order) associated with previous pitch locations due to the fact that a pitcher does not want to consistently pitch in the same location to keep the current batter guessing. Under the same logic, clustering or interactive property (second-order) can exist when a pitch has a high break angle pitch that is working very well and a pitcher wants to keep attempting similar pitches and pitch locations under the same at bat. Thus, the data was filtered to only include 1 pitch per at bat that has a high break angle. This should help to result in little to no interactions in the locations of pitches in the strike zone. This means that for each high break angle pitch location in the strike zone in the filtered data it should have no bearing to a previous pitch's location on the strike zone. 
+
+Theoretically, assuming a pitcher that has a high break angle pitch, it should not affect the location of strikes in the strike zone which should result in a homogeneous poisson process, and under the null hypothesis, a spatial variation (first-order) in intensity is that it should be expected that when a pitcher throws a higher break angle pitch it should result in a pitch location in the strike zone that is nearly constant in all areas of the strike zone (homogeneous poisson process). A secondary hypothesis is that when a pitcher knows that they will be throwing a higher break angle pitch, then it is more difficult to command the location of the pitch in the upper strike zone due to a lesser ability to know how high to throw if aiming for the upper strike zone.
+
+### Spatial statistical analysis on spatial dataset:
+
+A formal chi-squared test is completed for Complete Spatial Randomness (CSR) model to determine if the high break angle pitching location data in the strike zone can be rejected. The pitch data is split up into 3 x 6 quadrants in the below plot with the ppp data generated from parts a and b. Also, a table of the observed pitches in each quadrant is given below. 
+
+``` {r}
+# exploratory analysis -- quadrant count
+Q <- quadratcount(pp1, 
+                  nx = 3, 
+                  ny = 6) 
+Q
+
+# Plot the observed number of high break angle strike zone pitch locations in the strike zone with 3 x 6 quadrants.
+plot(pp1,
+     cex = 0.5,
+     pch = "+",
+     main=str_wrap("Figure 2. High break angle strike zone pitch locations split into 3x6 quadrants for a CSR chi^2 analysis.", 75))
+plot(Q, 
+     add = TRUE, 
+     cex = 1.5)
+title(xlab="px (width away from center of plate in ft)")
+title(ylab="pz (height in ft)", line = -2)
+axis(1, at = c(-1, 0, 1))
+axis(2, line = -5)
+```
+
+Using the total number of observed counts of pitches, the expected number of pitches per quadrant is calculated based on the total number of pitches divided by the number of quadrants ($1385.167$). Then for each quadrant, the squared difference between number of observed pitches by the number of expected pitches is divided by the number of expected pitches. The statistic is summed for all quadrants and is reported as the $\chi^2$ statistic. The following code chunk below shows the calculation of the $\chi^2$ statistic using the quadrat.test() function and the iterative method calculation as described. Both methods result in a $\chi^2$ statistic of $3065.7$. With $17$ degrees of freedom (18 quadrants - 1) and $\chi^2$ of $3065.7$, the p-value is presumed to be extremely small and basically $0$. With a tiny p-value (the p-value is significantly smaller than $\alpha = 0.05$ or $0.01$), this means that the high break angle pitching location strike zone data can emphatically reject the null hypothesis of a CSR pattern. 
+
+``` {r}
+# Using the quadrat.test function, calculate the chi^2 test of whether the spatial data is generated from a null CSR process or not.
+Qtest <- quadrat.test(pp1, nx = 3, ny = 6, method = "Chisq")
+Qtest
+Qtest$expected # Expected number of pitches per quadrant.
+Qtest$observed # Observed number of pitches per quadrant.
+# The following is the calculation of the chi^2 statistic, the p-value is obtained from a table with 17 degrees of freedom, which identifies that the p-value is basically 0 (extremely small p-value) and that the null hypothesis is emphatically rejected for this spatial data being generated from a CSR process. 
+total = 0
+for (i in 1:18){
+total = ((as.numeric(Qtest$observed[i]) - as.numeric(Qtest$expected[i]))^2)/as.numeric(Qtest$expected[i]) + total
+}
+total
+pchisq(total, df=17, lower.tail = FALSE)
+```
+
+Further analysis was completed on the high break angle pitching data to determine which model is potentially the best first-order model of the pitching location. It is shown below that with an ANOVA table between three models (constant trend, linear trend, and quadratic trend) shows that either the linear trend or quadratic trend models can both be used to reject the null hypothesis of the CSR model both with p-values close to 0. Both the quadratic and linear models show that there is an inhomogeneous first-order spatial point pattern where the intensity of high break angle pitches are closer to the bottom of the strike zone than the top of the strike zone. 
+
+``` {r message=FALSE, warning = FALSE}
+# Further analysis of the inhomogeneous mean (first-order) strike pitches data
+
+# constant trend
+fit1 <- ppm(pp1, ~ 1)
+summary(fit1)
+
+# linear trend in x and y
+fit2 <- ppm(pp1, ~ x + y)
+summary(fit2)
+plot(fit2, 
+     how = "image", 
+     se = FALSE, 
+     col = grey(seq(1,0,length=128)),
+     main = str_wrap("Figure 3. Linear trend (inhomogeneous) fit model on high break angle pitching data", 60))
+title(xlab="px (width away from center of plate in ft)")
+title(ylab="pz (height in ft)", line = -2)
+axis(1, at = c(-1, 0, 1))
+axis(2, line = -5)
+# quadratic trend in x and y
+fit3 <- ppm(pp1, ~ polynom(x, y, 2))
+summary(fit3)
+plot(fit3, 
+     how = "image", 
+     se = FALSE, 
+     col = grey(seq(1,0,length=128)),
+     main = str_wrap("Figure 4. Quadratic trend (inhomogeneous) fit model on high break angle pitching data", 60))
+title(xlab="px (width away from center of plate in ft)")
+title(ylab="pz (height in ft)", line = -2)
+axis(1, at = c(-1, 0, 1))
+axis(2, line = -5)
+
+# Likelihood ratio test of 
+#     H0:  homogeneous PP (CSR) vs. 
+#     H1:  inhomogeneous PP with intensity that is a loglinear function of the xy
+#     H2:  inhomogeneous PP with intensity that is a logquadratic function of the xy
+anova.ppm(fit1, fit2, fit3, test = "Chi")
+```
